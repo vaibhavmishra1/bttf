@@ -4,7 +4,26 @@ import re
 from config import FLOAT_TOL
 
 
-# ── Answer extraction ───────────────────────────────────────────────────────
+# ── Boxed-answer extraction (primary for S vs S') ────────────────────────────
+
+# Matches the last \boxed{...} — handles one level of nested braces
+_BOXED_RE = re.compile(r"\\boxed\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}")
+
+
+def extract_boxed_answer(text: str) -> str:
+    """Extract the last \\boxed{...} from a model solution.
+
+    Qwen2.5-3B-Instruct reliably wraps its final answer in \\boxed{}, so this
+    is used as the primary extractor when comparing S with S'.
+    Falls back to an empty string if no boxed answer is found.
+    """
+    matches = _BOXED_RE.findall(text)
+    if matches:
+        return matches[-1].strip()
+    return ""
+
+
+# ── Heuristic answer extraction (fallback / ground-truth comparison) ─────────
 
 _ANSWER_PATTERNS = [
     # #### <number>  (GSM8K style)
@@ -26,13 +45,13 @@ _NUMBER_RE = re.compile(
 def extract_answer(text: str) -> str:
     """Extract the final answer from a model solution string.
 
+    Used for comparing the model's answer against the ground-truth label.
     Tries structured patterns first, then falls back to the last number.
     """
     for pattern in _ANSWER_PATTERNS:
         matches = re.findall(pattern, text)
         if matches:
             answer = matches[-1].strip().replace(",", "")
-            # Clean up surrounding whitespace / punctuation
             answer = answer.strip(" .$")
             if answer:
                 return answer
@@ -62,7 +81,6 @@ def _sympy_equiv(a: str, b: str) -> bool | None:
         from sympy.parsing.latex import parse_latex
         from sympy import simplify, nsimplify
 
-        # Try LaTeX parse first, then sympify
         def _parse(expr_str: str):
             try:
                 return parse_latex(expr_str)

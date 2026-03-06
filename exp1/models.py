@@ -1,13 +1,32 @@
-"""Model wrappers: Solver (local HF), Reconstructor (OpenAI), Embedder."""
+"""Model wrappers: Solver (vLLM), Reconstructor (vLLM Qwen3.5-4B), Embedder (HF)."""
 
-import os
-import concurrent.futures
+import gc
+import re
 
 import numpy as np
 import torch
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModel
-from openai import OpenAI
+from transformers import AutoTokenizer, AutoModel
+from vllm import LLM, SamplingParams
+
+
+# ── vLLM memory cleanup ─────────────────────────────────────────────────────
+
+def _destroy_vllm(llm: LLM) -> None:
+    """Cleanly shut down a vLLM LLM instance and free GPU memory."""
+    try:
+        from vllm.distributed.parallel_state import (
+            destroy_model_parallel,
+            destroy_distributed_environment,
+        )
+        destroy_model_parallel()
+        destroy_distributed_environment()
+    except Exception:
+        pass
+    del llm
+    gc.collect()
+    torch.cuda.empty_cache()
+    print("  [vLLM] model destroyed, GPU memory freed.")
 
 
 # ── Solver ──────────────────────────────────────────────────────────────────
@@ -20,31 +39,27 @@ SOLVER_PROMPT = (
 
 
 class Solver:
-    """Qwen2.5-3B-Instruct local solver with batched generation."""
+    """Qwen2.5-3B-Instruct vLLM solver with batched generation."""
 
     def __init__(self, model_name: str = "Qwen/Qwen2.5-3B-Instruct"):
-        self.tokenizer = AutoTokenizer.from_pretrained(
+        print(f"  [vLLM] Loading Solver: {model_name}")
+        self._tokenizer = AutoTokenizer.from_pretrained(
             model_name, trust_remote_code=True
         )
-        # Left-pad for batched decoder generation
-        self.tokenizer.padding_side = "left"
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16,
-            device_map="auto",
+        self._llm = LLM(
+            model=model_name,
+            dtype="float16",
+            gpu_memory_utilization=0.85,
             trust_remote_code=True,
+            enforce_eager=False,
         )
-        self.model.eval()
 
     # ── helpers ─────────────────────────────────────────────────────────
     def _build_prompt(self, question: str) -> str:
         messages = [
             {"role": "user", "content": SOLVER_PROMPT.format(question=question)}
         ]
-        return self.tokenizer.apply_chat_template(
+        return self._tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
 
@@ -52,104 +67,156 @@ class Solver:
     def solve_batch(
         self,
         questions: list[str],
-        max_new_tokens: int = 1024,
-        batch_size: int = 8,
+        max_new_tokens: int = 2048,
+        batch_size: int = 256,  # ignored; vLLM handles batching internally
     ) -> list[str]:
-        solutions: list[str] = []
-        for i in tqdm(range(0, len(questions), batch_size), desc="Solving"):
-            batch_q = questions[i : i + batch_size]
-            prompts = [self._build_prompt(q) for q in batch_q]
+        prompts = [self._build_prompt(q) for q in questions]
+        params = SamplingParams(temperature=0, max_tokens=max_new_tokens)
+        outputs = self._llm.generate(prompts, params)
+        return [o.outputs[0].text.strip() for o in outputs]
 
-            inputs = self.tokenizer(
-                prompts,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=2048,
-            ).to(self.model.device)
-
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=False,
-                )
-
-            for j, output_ids in enumerate(outputs):
-                prompt_len = inputs["input_ids"][j].shape[0]
-                generated = self.tokenizer.decode(
-                    output_ids[prompt_len:], skip_special_tokens=True
-                )
-                solutions.append(generated.strip())
-
-        return solutions
+    def destroy(self) -> None:
+        _destroy_vllm(self._llm)
 
 
 # ── Reconstructor ───────────────────────────────────────────────────────────
 
-RECONSTRUCTOR_PROMPT = (
-    "Given the following solution to a math problem, "
-    "reconstruct the original question.\n\n"
-    "The reconstructed question should preserve the same numbers, "
-    "entities, and relationships.\n\n"
-    "Output only the question.\n\n"
-    "Solution:\n{solution}\n\nOriginal Question:"
+# ── Few-shot examples ────────────────────────────────────────────────────────
+# Each example: (solution_text, original_question)
+_FEW_SHOT = [
+    (
+        "The total eggs laid per day is 16. Janet eats 3 for breakfast and uses 4 for "
+        "muffins, so she uses 7 eggs altogether. Remaining eggs: 16 − 7 = 9. "
+        "Selling 9 eggs at $2 each gives 9 × 2 = \\boxed{18} dollars.",
+        "Janet's ducks lay 16 eggs per day. She eats three for breakfast every morning "
+        "and bakes muffins for her friends every day with four. She sells the remainder "
+        "at the farmers' market daily for $2 per fresh duck egg. How much in dollars "
+        "does she make every day at the farmers' market?",
+    ),
+    (
+        "A robe requires 2 bolts of blue fiber. White fiber = half of blue = "
+        "1/2 × 2 = 1 bolt. Total bolts = 2 + 1 = \\boxed{3}.",
+        "A robe takes 2 bolts of blue fiber and half that much white fiber. "
+        "How many bolts in total does it take?",
+    ),
+    (
+        "James runs 3 sprints per session, 60 meters each, so one session = "
+        "3 × 60 = 180 meters. He trains 3 sessions per week, so the weekly total is "
+        "3 × 180 = \\boxed{540} meters.",
+        "James decides to run 3 sprints 3 times a week. He runs 60 meters each sprint. "
+        "How many total meters does he run a week?",
+    ),
+    (
+        "Wendi has 20 chickens, each needing 3 cups/day, so total daily need = 60 cups. "
+        "Morning: 15 cups. Afternoon: 25 cups. Already given: 15 + 25 = 40 cups. "
+        "Final meal: 60 − 40 = \\boxed{20} cups.",
+        "Every day, Wendi feeds each of her chickens three cups of mixed chicken feed. "
+        "She gives the chickens their feed in three separate meals. In the morning, she "
+        "gives her flock of chickens 15 cups of feed. In the afternoon, she gives her "
+        "chickens another 25 cups of feed. How many cups of feed does she need to give "
+        "her chickens in the final meal of the day if the size of Wendi's flock is "
+        "20 chickens?",
+    ),
+]
+
+_RECONSTRUCTOR_SYSTEM = (
+    "You are an expert at recovering the original math word problem from its solution.\n"
+    "Rules:\n"
+    "  1. Preserve all numbers, names, units, and relationships from the solution.\n"
+    "  2. Output ONLY the reconstructed question — nothing else.\n"
+    "  3. Always start your output with the exact token: QUESTION:"
 )
+
+_QUESTION_RE = re.compile(r"QUESTION:\s*(.+)", re.IGNORECASE | re.DOTALL)
+
+
+def _build_reconstructor_messages(solution: str) -> list[dict]:
+    """Multi-turn few-shot chat messages for the reconstructor."""
+    messages: list[dict] = [{"role": "system", "content": _RECONSTRUCTOR_SYSTEM}]
+    for sol_ex, q_ex in _FEW_SHOT:
+        messages.append({"role": "user",      "content": f"Solution:\n{sol_ex}"})
+        messages.append({"role": "assistant", "content": f"QUESTION: {q_ex}"})
+    messages.append({"role": "user", "content": f"Solution:\n{solution}"})
+    return messages
 
 
 class Reconstructor:
-    """GPT-4.1 question reconstructor via OpenAI API."""
+    """Qwen3.5-4B local reconstructor via vLLM with few-shot prompting."""
 
-    def __init__(self, model: str = "gpt-4.1"):
-        self.client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        self.model = model
-
-    def _reconstruct_one(self, solution: str) -> str:
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": RECONSTRUCTOR_PROMPT.format(solution=solution),
-                }
-            ],
-            temperature=0.0,
-            max_tokens=512,
+    def __init__(self, model_name: str = "Qwen/Qwen3-4B"):
+        print(f"  [vLLM] Loading Reconstructor: {model_name}")
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            model_name, trust_remote_code=True
         )
-        return resp.choices[0].message.content.strip()
+        self._llm = LLM(
+            model=model_name,
+            dtype="bfloat16",
+            gpu_memory_utilization=0.85,
+            trust_remote_code=True,
+            enforce_eager=False,
+        )
+        self._params = SamplingParams(temperature=0, max_tokens=512)
+
+    def _build_prompt(self, solution: str) -> str:
+        messages = _build_reconstructor_messages(solution)
+        # think=False disables Qwen3's extended-thinking mode so the model
+        # goes straight to the answer without emitting <think>…</think> tokens.
+        try:
+            return self._tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True, think=False
+            )
+        except TypeError:
+            # Older tokenizers that don't support `think`
+            return self._tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
 
     def reconstruct_batch(
-        self, solutions: list[str], max_concurrent: int = 20
+        self,
+        solutions: list[str],
+        max_concurrent: int = 20,  # unused; kept for API compat
     ) -> list[str]:
-        results: list[str | None] = [None] * len(solutions)
+        print(f"  Reconstructing {len(solutions)} solutions via vLLM …")
+        prompts = [self._build_prompt(s) for s in solutions]
+        outputs = self._llm.generate(prompts, self._params)
 
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=max_concurrent
-        ) as pool:
-            future_to_idx = {
-                pool.submit(self._reconstruct_one, sol): idx
-                for idx, sol in enumerate(solutions)
-            }
-            for future in tqdm(
-                concurrent.futures.as_completed(future_to_idx),
-                total=len(future_to_idx),
-                desc="Reconstructing",
-            ):
-                idx = future_to_idx[future]
-                try:
-                    results[idx] = future.result()
-                except Exception as exc:
-                    print(f"  [!] index {idx} failed: {exc}")
-                    results[idx] = ""
+        results: list[str] = []
+        n_fallback = 0
+        _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+        for o in outputs:
+            text = o.outputs[0].text.strip()
+            # Strip any residual <think>…</think> blocks
+            text = _THINK_RE.sub("", text).strip()
+            m = _QUESTION_RE.search(text)
+            if m:
+                # Take only the first line of the match
+                question = m.group(1).strip().splitlines()[0].strip()
+                results.append(question)
+            else:
+                # Fallback: first non-empty line that isn't a think tag
+                lines = [ln.strip() for ln in text.splitlines()
+                         if ln.strip() and not ln.strip().startswith("<think")]
+                first_line = lines[0] if lines else ""
+                if first_line:
+                    n_fallback += 1
+                results.append(first_line)
+        if n_fallback:
+            print(f"  [!] {n_fallback}/{len(outputs)} reconstructions used fallback (no QUESTION: prefix)")
+        return results
 
-        return results  # type: ignore[return-value]
+    def destroy(self) -> None:
+        _destroy_vllm(self._llm)
 
 
 # ── Embedder ────────────────────────────────────────────────────────────────
 
 
 class Embedder:
-    """Qwen3-Embedding-0.6B embedder (last-token pooling, L2-normalised)."""
+    """Qwen3-Embedding-0.6B embedder (last-token pooling, L2-normalised).
+
+    Kept as HuggingFace — the model is tiny (0.6 B) and vLLM's embedding
+    API would add unnecessary overhead here.
+    """
 
     def __init__(self, model_name: str = "Qwen/Qwen3-Embedding-0.6B"):
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -157,12 +224,12 @@ class Embedder:
         )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.tokenizer.padding_side = "right"  # pad right for embedding
+        self.tokenizer.padding_side = "right"
 
         self.model = AutoModel.from_pretrained(
             model_name,
             torch_dtype=torch.float16,
-            device_map="auto",
+            device_map={"": 0},
             trust_remote_code=True,
         )
         self.model.eval()
@@ -170,14 +237,11 @@ class Embedder:
     def _last_token_pool(
         self, hidden_states: torch.Tensor, attention_mask: torch.Tensor
     ) -> torch.Tensor:
-        """Pool using the last non-padding token."""
-        seq_lengths = attention_mask.sum(dim=1) - 1  # (batch,)
+        seq_lengths = attention_mask.sum(dim=1) - 1
         batch_idx = torch.arange(hidden_states.size(0), device=hidden_states.device)
         return hidden_states[batch_idx, seq_lengths]
 
-    def embed(
-        self, texts: list[str], batch_size: int = 32
-    ) -> np.ndarray:
+    def embed(self, texts: list[str], batch_size: int = 32) -> np.ndarray:
         all_embs: list[np.ndarray] = []
         for i in tqdm(range(0, len(texts), batch_size), desc="Embedding"):
             batch = texts[i : i + batch_size]
@@ -190,11 +254,9 @@ class Embedder:
             ).to(self.model.device)
 
             with torch.no_grad():
-                outputs = self.model(**inputs)
+                out = self.model(**inputs)
 
-            embs = self._last_token_pool(
-                outputs.last_hidden_state, inputs["attention_mask"]
-            )
+            embs = self._last_token_pool(out.last_hidden_state, inputs["attention_mask"])
             embs = torch.nn.functional.normalize(embs, p=2, dim=1)
             all_embs.append(embs.cpu().float().numpy())
 

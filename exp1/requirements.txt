@@ -1,7 +1,9 @@
 torch>=2.1
 transformers>=4.40
 datasets>=2.19
+vllm>=0.6
 openai>=1.30
+pandas>=2.0
 numpy>=1.26
 scipy>=1.12
 scikit-learn>=1.4

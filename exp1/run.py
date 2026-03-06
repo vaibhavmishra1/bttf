@@ -5,9 +5,11 @@ for LLM Reasoning Correctness.
 
 Pipeline:  Q → Solver → S → Reconstructor → Q' → Solver → S'
 
+Datasets: GSM8K (easy) · MATH (medium) · OlympiadBench (hard)
+
 Run:
-    python run.py                  # full pipeline
-    python run.py --resume         # skip steps whose output files already exist
+    python run.py                  # full pipeline from scratch
+    python run.py --resume         # skip steps whose output files exist
 """
 
 import argparse
@@ -24,6 +26,7 @@ from config import (
     EMBEDDING_MODEL,
     GSM8K_SAMPLES,
     MATH_SAMPLES,
+    OLYMPIADBENCH_SAMPLES,
     MAX_NEW_TOKENS,
     SOLVER_BATCH_SIZE,
     EMBEDDING_BATCH_SIZE,
@@ -33,7 +36,7 @@ from config import (
 )
 from data import load_all_data
 from models import Solver, Reconstructor, Embedder
-from utils import extract_answer, answers_equivalent
+from utils import extract_answer, extract_boxed_answer, answers_equivalent
 from metrics import compute_all_metrics
 from visualize import generate_all_plots
 
@@ -53,7 +56,6 @@ def load_jsonl(path: str) -> list[dict]:
 
 
 def _cached(path: str, resume: bool) -> list[dict] | None:
-    """Return cached data if *resume* is True and the file exists."""
     if resume and os.path.exists(path):
         print(f"  ↳ cache hit: {os.path.basename(path)}")
         return load_jsonl(path)
@@ -73,39 +75,42 @@ def main(resume: bool = False) -> None:
     data = _cached(data_path, resume)
     if data is None:
         print("[Step 0] Loading datasets …")
-        data = load_all_data(GSM8K_SAMPLES, MATH_SAMPLES)
+        data = load_all_data(GSM8K_SAMPLES, MATH_SAMPLES, OLYMPIADBENCH_SAMPLES)
         save_jsonl(data, data_path)
-    print(f"  Total samples: {len(data)}")
+    ds_counts = {k: sum(1 for d in data if d["dataset"] == k) for k in set(d["dataset"] for d in data)}
+    print(f"  Total samples: {len(data)}  |  " + "  ".join(f"{k}={v}" for k,v in sorted(ds_counts.items())))
 
     # ── Step 1: Solve Q → S ───────────────────────────────────────────
     step1_path = os.path.join(OUTPUT_DIR, "step1_solutions.jsonl")
     data = _cached(step1_path, resume)
     if data is None:
         data = load_jsonl(data_path)
-        print("[Step 1] Solving questions with local model …")
+        print("[Step 1] Solving questions with vLLM …")
         solver = Solver(SOLVER_MODEL)
-        questions = [d["question"] for d in data]
-        solutions = solver.solve_batch(questions, MAX_NEW_TOKENS, SOLVER_BATCH_SIZE)
+        solutions = solver.solve_batch(
+            [d["question"] for d in data], MAX_NEW_TOKENS, SOLVER_BATCH_SIZE
+        )
         for d, s in zip(data, solutions):
             d["solution_S"] = s
         save_jsonl(data, step1_path)
+        solver.destroy()
         del solver
-        torch.cuda.empty_cache()
 
     # ── Step 2: S → Reconstructor → Q' ────────────────────────────────
     step2_path = os.path.join(OUTPUT_DIR, "step2_reconstructed.jsonl")
     data = _cached(step2_path, resume)
     if data is None:
         data = load_jsonl(step1_path)
-        print("[Step 2] Reconstructing questions via OpenAI …")
+        print("[Step 2] Reconstructing questions via vLLM (Qwen3-4B) …")
         reconstructor = Reconstructor(RECONSTRUCTOR_MODEL)
-        solutions = [d["solution_S"] for d in data]
         reconstructed = reconstructor.reconstruct_batch(
-            solutions, RECONSTRUCTOR_CONCURRENT
+            [d["solution_S"] for d in data], RECONSTRUCTOR_CONCURRENT
         )
         for d, q in zip(data, reconstructed):
             d["question_Q_prime"] = q
         save_jsonl(data, step2_path)
+        reconstructor.destroy()
+        del reconstructor
 
     # ── Step 3: Q' → Solver → S' ─────────────────────────────────────
     step3_path = os.path.join(OUTPUT_DIR, "step3_second_solutions.jsonl")
@@ -114,15 +119,14 @@ def main(resume: bool = False) -> None:
         data = load_jsonl(step2_path)
         print("[Step 3] Solving reconstructed questions …")
         solver = Solver(SOLVER_MODEL)
-        questions_prime = [d["question_Q_prime"] for d in data]
         solutions_prime = solver.solve_batch(
-            questions_prime, MAX_NEW_TOKENS, SOLVER_BATCH_SIZE
+            [d["question_Q_prime"] for d in data], MAX_NEW_TOKENS, SOLVER_BATCH_SIZE
         )
         for d, s in zip(data, solutions_prime):
             d["solution_S_prime"] = s
         save_jsonl(data, step3_path)
+        solver.destroy()
         del solver
-        torch.cuda.empty_cache()
 
     # ── Step 4: Embed Q, Q' → question_cycle ──────────────────────────
     step4_path = os.path.join(OUTPUT_DIR, "step4_embeddings.jsonl")
@@ -131,16 +135,10 @@ def main(resume: bool = False) -> None:
         data = load_jsonl(step3_path)
         print("[Step 4] Computing embeddings …")
         embedder = Embedder(EMBEDDING_MODEL)
-        emb_q = embedder.embed(
-            [d["question"] for d in data], EMBEDDING_BATCH_SIZE
-        )
-        emb_qp = embedder.embed(
-            [d["question_Q_prime"] for d in data], EMBEDDING_BATCH_SIZE
-        )
-        # Cosine similarity (vectors are already L2-normalised)
-        cosine_sims = np.sum(emb_q * emb_qp, axis=1)
+        emb_q  = embedder.embed([d["question"]         for d in data], EMBEDDING_BATCH_SIZE)
+        emb_qp = embedder.embed([d["question_Q_prime"] for d in data], EMBEDDING_BATCH_SIZE)
+        cosine_sims   = np.sum(emb_q * emb_qp, axis=1)
         question_cycles = 1.0 - cosine_sims
-
         for d, qc in zip(data, question_cycles):
             d["question_cycle"] = float(qc)
         save_jsonl(data, step4_path)
@@ -154,8 +152,12 @@ def main(resume: bool = False) -> None:
         data = load_jsonl(step4_path)
         print("[Steps 5–7] Extracting & comparing answers …")
         for d in data:
-            d["answer_A"] = extract_answer(d["solution_S"])
-            d["answer_A_prime"] = extract_answer(d["solution_S_prime"])
+            # answer_match: use \boxed{} from both S and S' (model reliably outputs it)
+            boxed_A       = extract_boxed_answer(d["solution_S"])
+            boxed_A_prime = extract_boxed_answer(d["solution_S_prime"])
+            d["answer_A"]       = boxed_A       if boxed_A       else extract_answer(d["solution_S"])
+            d["answer_A_prime"] = boxed_A_prime if boxed_A_prime else extract_answer(d["solution_S_prime"])
+
             d["answer_match"] = int(
                 answers_equivalent(d["answer_A"], d["answer_A_prime"])
             )
@@ -165,20 +167,31 @@ def main(resume: bool = False) -> None:
             d["combined_reward"] = d["answer_match"] - d["question_cycle"]
         save_jsonl(data, results_path)
 
-    # ── Step 9: Metrics ───────────────────────────────────────────────
-    print("\n" + "=" * 55)
-    print(" Step 9 — Metrics")
-    print("=" * 55)
-    compute_all_metrics(data)
+    # ── Step 9: Metrics — overall + per-dataset ────────────────────────
+    sep = "\n" + "=" * 70
+    print(sep)
+    print(" Step 9 — Discrimination Metrics")
+    print("=" * 70)
 
-    # ── Step 10: Visualizations ───────────────────────────────────────
-    print("\n" + "=" * 55)
-    print(" Step 10 — Visualizations")
-    print("=" * 55)
+    datasets_present = sorted(set(d["dataset"] for d in data))
+
+    # Overall
+    compute_all_metrics(data, label="ALL datasets combined")
+
+    # Per dataset
+    for ds in datasets_present:
+        subset = [d for d in data if d["dataset"] == ds]
+        compute_all_metrics(subset, label=ds.upper())
+
+    # ── Step 10: Visualizations — per-dataset sub-folders ─────────────
+    print(sep)
+    print(" Step 10 — Visualizations (per-dataset folders)")
+    print("=" * 70)
     generate_all_plots(data, PLOTS_DIR)
 
     elapsed = time.time() - t0
     print(f"\n✓ Done in {elapsed / 60:.1f} min.  Outputs → {OUTPUT_DIR}")
+    print(f"  Plots saved to sub-folders inside {PLOTS_DIR}/")
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
