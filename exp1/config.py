@@ -4,8 +4,8 @@ import os
 
 # ── Models ──────────────────────────────────────────────────────────────────
 SOLVER_MODEL = "Qwen/Qwen2.5-3B-Instruct"
-RECONSTRUCTOR_MODEL = "Qwen/Qwen3-4B"       # Qwen3.5-4B not yet in transformers<5/vLLM 0.16
-EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-0.6B"
+RECONSTRUCTOR_MODEL = "Qwen/Qwen3-8B-Base"       # Qwen3.5-4B not yet in transformers<5/vLLM 0.16
+EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-4B"
 
 # ── Dataset sizes ───────────────────────────────────────────────────────────
 GSM8K_SAMPLES          = 1000
@@ -23,5 +23,5 @@ FLOAT_TOL = 1e-6
 
 # ── Paths ──────────────────────────────────────────────────────────────────
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
-PLOTS_DIR  = os.path.join(OUTPUT_DIR, "plots")
+OUTPUT_DIR = os.path.join(BASE_DIR, "outputs_v2")
+PLOTS_DIR  = os.path.join(OUTPUT_DIR, "plots_v2")
