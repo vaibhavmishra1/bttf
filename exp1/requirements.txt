@@ -10,4 +10,5 @@ scikit-learn>=1.4
 matplotlib>=3.8
 seaborn>=0.13
 sympy>=1.12
+sacrebleu>=2.3
 tqdm>=4.66

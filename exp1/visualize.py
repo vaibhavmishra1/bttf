@@ -35,7 +35,7 @@ def _title_suffix(label: str) -> str:
 def plot_discrimination_bars(data: list[dict], save_dir: str, label: str = "all"):
     """Grouped bar chart: mean ± std of each signal for correct vs incorrect."""
     signals = {
-        "Question Cycle\n(dist↓)":    "question_cycle",
+        "Hybrid Cycle\n(dist↓)":      "hybrid_cycle",
         "Answer Match\n(agree↑)":     "answer_match",
         "Combined\nReward (↑)":       "combined_reward",
     }
@@ -83,14 +83,14 @@ def plot_discrimination_bars(data: list[dict], save_dir: str, label: str = "all"
 # ── 2. Violin plot ───────────────────────────────────────────────────────────
 
 def plot_violin(data: list[dict], save_dir: str, label: str = "all"):
-    """Violin plots of question_cycle and combined_reward, by correctness."""
+    """Violin plots of hybrid_cycle and combined_reward, by correctness."""
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     suf = _title_suffix(label)
 
     for ax, key, title in zip(
         axes,
-        ["question_cycle", "combined_reward"],
-        ["Question Cycle Distance (dist↓)", "Combined Reward (↑)"],
+        ["hybrid_cycle", "combined_reward"],
+        ["Hybrid Cycle Distance (dist↓)", "Combined Reward (↑)"],
     ):
         correct_vals, incorrect_vals = _split(data, key)
 
@@ -127,8 +127,8 @@ def plot_violin(data: list[dict], save_dir: str, label: str = "all"):
 # ── 3. Histogram ─────────────────────────────────────────────────────────────
 
 def plot_histogram(data: list[dict], save_dir: str, label: str = "all"):
-    """Overlapping histogram of question_cycle for correct vs incorrect."""
-    correct_vals, incorrect_vals = _split(data, "question_cycle")
+    """Overlapping histogram of hybrid_cycle for correct vs incorrect."""
+    correct_vals, incorrect_vals = _split(data, "hybrid_cycle")
     suf = _title_suffix(label)
 
     plt.figure(figsize=(8, 5))
@@ -142,12 +142,12 @@ def plot_histogram(data: list[dict], save_dir: str, label: str = "all"):
                 label=f"mean correct={np.mean(correct_vals):.3f}")
     plt.axvline(np.mean(incorrect_vals), color=_C_INCORRECT, linestyle="--", lw=1.8,
                 label=f"mean incorrect={np.mean(incorrect_vals):.3f}")
-    plt.xlabel("question_cycle  (1 − cosine similarity)")
+    plt.xlabel("hybrid_cycle  (0.4·embed + 0.4·num_jaccard + 0.2·chrF)")
     plt.ylabel("Density")
-    plt.title(f"Question Cycle Distance Distribution{suf}")
+    plt.title(f"Hybrid Cycle Distance Distribution{suf}")
     plt.legend(fontsize=9)
     plt.tight_layout()
-    path = os.path.join(save_dir, "histogram_question_cycle.png")
+    path = os.path.join(save_dir, "histogram_hybrid_cycle.png")
     plt.savefig(path, dpi=150)
     plt.close()
     print(f"  Saved {path}")
@@ -212,7 +212,7 @@ def plot_summary_dashboard(data: list[dict], save_dir: str, label: str = "all"):
     gs  = gridspec.GridSpec(2, 3, figure=fig, hspace=0.45, wspace=0.35)
 
     signal_cfg = [
-        ("question_cycle",  "Question Cycle Distance (dist↓)",  "lower"),
+        ("hybrid_cycle",    "Hybrid Cycle Distance (dist↓)",     "lower"),
         ("answer_match",    "Answer Match Agreement (↑)",        "higher"),
         ("combined_reward", "Combined Reward (↑)",               "higher"),
     ]

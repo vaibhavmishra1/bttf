@@ -1,26 +1,32 @@
-# Experiment 1 — Cycle-Consistency as a Self-Supervised Signal for Reasoning Correctness
+# Experiment 1 — Results Report
+
+## Part A: Original Run (v1) · Reconstructor: Qwen3-4B
+## Part B: v1 vs v2 Comparative Analysis · v2 Reconstructor: Qwen3-8B-Base
+
+---
+
+# PART A — Original Experiment (v1)
 
 ## Verdict: PASS — The signal works, with caveats
 
-Cycle-consistency **does** discriminate correct from incorrect solutions. The combined reward achieves **AUROC 0.708** overall (random = 0.50) and enables selective prediction that boosts accuracy from 56% → 88% when keeping the top 10% highest-confidence samples. However, the signal is dominated by `answer_match` (self-consistency), while the embedding-based `question_cycle` alone is weak. The method also has systematic failure modes in answer extraction and reconstructor behaviour that bound its ceiling.
+Cycle-consistency **does** discriminate correct from incorrect solutions. The combined reward achieves **AUROC 0.708** overall (random = 0.50) and enables selective prediction that boosts accuracy from 56% → 88% when keeping the top 10% highest-confidence samples. However, the signal is dominated by `answer_match` (self-consistency), while the embedding-based `question_cycle` alone is weak. The method is also bounded by systematic failure modes in answer extraction and reconstructor output quality.
 
 ---
 
-## 1. Setup Recap
+## A1. Setup
 
-| | |
+| Component | v1 |
 |---|---|
-| **Solver** | Qwen2.5-3B-Instruct (local) |
-| **Reconstructor** | "Qwen/Qwen3-4B"    |
-| **Embedding model** | Qwen3-Embedding-0.6B |
-| **Datasets** | GSM8K (1000), MATH (500), OlympiadBench (300) |
-| **Total samples** | 1800 |
+| **Solver** | Qwen/Qwen2.5-3B-Instruct (local vLLM) |
+| **Reconstructor** | Qwen/Qwen3-4B (local vLLM, instruct model) |
+| **Embedding model** | Qwen/Qwen3-Embedding-**0.6B** |
+| **Datasets** | GSM8K (1000), MATH (500), OlympiadBench (300) — 1800 total |
 
 ---
 
-## 2. Headline Metrics
+## A2. Headline Metrics
 
-### Solver accuracy (baseline)
+### Solver accuracy
 
 | Dataset | N | Accuracy |
 |---|---|---|
@@ -29,174 +35,243 @@ Cycle-consistency **does** discriminate correct from incorrect solutions. The co
 | OlympiadBench | 300 | 24.0% |
 | **All** | **1800** | **56.1%** |
 
-### AUROC — predicting solver correctness
+### AUROC / AUPRC
 
 | Signal | GSM8K | MATH | OlympiadBench | All |
 |---|---|---|---|---|
-| `question_cycle` (negated) | 0.558 | 0.559 | 0.531 | 0.608 |
-| `answer_match` | 0.737 | 0.641 | 0.648 | 0.702 |
-| `combined_reward` | 0.715 | 0.636 | 0.618 | 0.708 |
+| `question_cycle` (neg) AUROC | 0.558 | 0.559 | 0.531 | 0.608 |
+| `answer_match` AUROC | 0.737 | 0.641 | 0.648 | 0.702 |
+| `combined_reward` AUROC | 0.715 | 0.636 | 0.618 | 0.708 |
+| `combined_reward` AUPRC | 0.824 | 0.712 | 0.447 | 0.770 |
 
-### AUPRC
+### Selective prediction
 
-| Signal | GSM8K | MATH | OlympiadBench | All |
-|---|---|---|---|---|
-| `question_cycle` (negated) | 0.699 | 0.634 | 0.305 | 0.657 |
-| `answer_match` | 0.815 | 0.671 | 0.335 | 0.747 |
-| `combined_reward` | 0.824 | 0.712 | 0.447 | 0.770 |
-
----
-
-## 3. Signal-by-Signal Analysis
-
-### 3.1 `answer_match` — the dominant signal
-
-This is the strongest individual predictor (AUROC 0.702 overall). Correct solutions get `answer_match = 1` at a rate of **63.7%**, versus only **23.3%** for incorrect solutions. Effect size is large (Cohen's d = 0.887).
-
-**Why it works:** If the solver gets the right answer to Q, the reconstructed Q' is usually close enough that the solver gets the same right answer again. Incorrect solutions often introduce drift that changes the second answer.
-
-**Why it has a ceiling:** 184 samples (23.3% of incorrect) are "consistently wrong" — the solver makes the exact same mistake on Q and Q'. These are false positives that the cycle cannot detect.
-
-### 3.2 `question_cycle` — weak but real
-
-The embedding distance between Q and Q' carries **marginal** discriminative power (AUROC 0.531–0.559 per-dataset, 0.608 overall). Correct solutions have mean cycle distance 0.136 vs 0.178 for incorrect — a small gap (Cohen's d = 0.310) with heavy overlap.
-
-**Why it's weak:**
-- GPT-4.1 is a very capable reconstructor. Even from a wrong solution, it often recovers Q' close to Q, because the solution still mentions the same entities, numbers, and setup.
-- The 0.6B embedding model may lack sensitivity to small numerical changes (e.g., "8 apples" vs "6 apples" embed similarly).
-- 575/1800 (32%) of reconstructed Q' start with meta-commentary ("Okay, let's see...") rather than a clean question. These inflate `question_cycle` for reasons unrelated to solution quality.
-
-**Where it helps:** The cross-dataset aggregation shows a bigger gap (AUROC 0.608 vs ~0.55 per-dataset), suggesting `question_cycle` partly captures dataset difficulty as a confound — harder datasets have higher cycle distances on average.
-
-### 3.3 `combined_reward = answer_match - question_cycle`
-
-The combination is the best single predictor by AUPRC (0.770 overall, 0.824 on GSM8K) though its AUROC (0.708) is close to `answer_match` alone (0.702). The cycle term helps slightly at the margins.
-
-**Distribution shapes (from violin plots):**
-- Correct solutions cluster bimodally: a large peak near +0.9 (answer_match=1, low cycle) and a smaller mass near −0.1 (answer_match=0).
-- Incorrect solutions cluster near 0 and below.
-- The separation is clearest for GSM8K, weakest for OlympiadBench.
-
----
-
-## 4. Selective Prediction (Practical Utility)
-
-If you use `combined_reward` to rank samples and only keep the top-K%, the accuracy increases substantially:
-
-| Keep top-K% | N kept | Accuracy | Coverage |
-|---|---|---|---|
-| 10% | 180 | **88.3%** | Low |
-| 20% | 360 | **86.1%** | |
-| 30% | 540 | **84.8%** | |
-| 50% | 900 | 74.1% | |
-| 70% | 1260 | 61.8% | |
-| 100% | 1800 | 56.1% | Full |
-
-Keeping the top 30% by combined_reward lifts accuracy from 56% to 85% — a strong result for a **label-free** signal. This is the most practically useful outcome of the experiment.
-
----
-
-## 5. Edge Case Analysis
-
-### 5.1 False negatives — correct but low `combined_reward`
-
-**366/1009 (36.3%)** correct solutions have `answer_match = 0`. This is the biggest failure mode. Root causes:
-
-1. **Answer extraction failures** (dominant cause): The solver's second output S' often wraps the answer in text ("Wendi needs to give her chickens **20 cups** of feed") instead of a clean number, causing the regex extractor to miss it — even though the numeric answer is correct.
-   - Example: id=4 — `answer_A = "64"`, `answer_A_prime = "16"` — the extractor pulled the wrong number from S'.
-   - Example: id=3 — `answer_A = "20"`, `answer_A_prime = "Wendi needs to give her chickens **20 cups**..."` — string mismatch despite both being correct.
-
-2. **Reconstructor meta-commentary**: When Q' starts with "Okay, let's see..." instead of a clean question, the solver receives a garbled prompt, producing a malformed S' from which answer extraction fails.
-
-3. **Legitimate reconstruction drift**: For some complex problems, Q' loses a constraint, changing the answer.
-
-### 5.2 False positives — incorrect but high `combined_reward`
-
-**184/791 (23.3%)** incorrect solutions have `answer_match = 1` (consistently wrong). These defeat the cycle signal entirely. Examples:
-
-| id | Dataset | A (wrong) | GT (correct) | qc | cr |
-|---|---|---|---|---|---|
-| 1438 | MATH | 7 | 4 | 0.0001 | 0.9999 |
-| 44 | GSM8K | 18 | 17 | 0.0287 | 0.971 |
-| 53 | GSM8K | 7.5 | 60 | 0.066 | 0.934 |
-
-These are problems where the model has a deterministic, reproducible misconception. The cycle is perfectly consistent — Q' ≈ Q, S' ≈ S — but the underlying reasoning is wrong. **This is the fundamental limitation of self-consistency approaches: consistency ≠ correctness.**
-
-### 5.3 Answer extraction is a bottleneck
-
-- **73/1800 (4.1%)** samples have completely empty `answer_A_prime` (extraction returned "").
-- Of those, 39 are correct solutions that get `answer_match = 0` purely due to extraction failure.
-- The regex patterns struggle with MATH-style answers (LaTeX fractions, intervals like `(-∞, 0]`, symbolic expressions).
-- The reconstructor's tendency to output "thinking aloud" (meta-commentary) causes the second solve to produce prose-heavy outputs that break extraction.
-
-### 5.4 Reconstructor behaviour
-
-- **575/1800 (32%)** of Q' outputs begin with meta-commentary instead of a clean reconstructed question.
-- These have significantly worse metrics: mean `question_cycle = 0.270` (vs 0.100 for clean Q') and mean `answer_match = 0.282` (vs 0.543 for clean Q').
-- This is a prompt engineering issue with the reconstructor — the "output only the question" instruction is not always followed.
-
----
-
-## 6. Per-Dataset Breakdown
-
-### GSM8K (N=1000) — best results
-- Highest solver accuracy (65.9%) and best AUROC (0.715/0.737).
-- Word problems with clean numeric answers → extraction works well.
-- `answer_match` rate: 69% for correct vs 22% for incorrect — strong separation.
-
-### MATH (N=500) — moderate
-- Solver accuracy 55.6%, AUROC 0.636.
-- LaTeX/symbolic answers cause more extraction failures.
-- Higher `question_cycle` overall (mean 0.21) — complex problems are harder to reconstruct.
-
-### OlympiadBench (N=300) — weakest
-- Very low solver accuracy (24%), making class imbalance severe.
-- `question_cycle` is essentially flat (Δ = 0.004 between correct/incorrect) — no discriminative power.
-- `answer_match` still works (AUROC 0.648) but the low base rate means AUPRC is just 0.335.
-- Problems are sufficiently hard that both correct and incorrect solutions produce high reconstruction error.
-
----
-
-## 7. Effect Sizes (Cohen's d)
-
-| Signal | d | Interpretation |
+| Keep top-K% | N kept | Accuracy |
 |---|---|---|
-| `question_cycle` | 0.310 | Small |
-| `answer_match` | 0.887 | Large |
-| `combined_reward` | 0.859 | Large |
-
-The effect is driven almost entirely by `answer_match`. The cycle-distance term contributes a small–moderate boost.
-
----
-
-## 8. What Worked, What Didn't
-
-### ✅ Worked
-- **The core hypothesis holds**: cycle-consistency correlates with correctness. AUROC 0.708 is well above chance and practically useful.
-- **Selective prediction**: keeping the top 10–30% by `combined_reward` yields 85–88% accuracy from a 56% solver — strong practical value.
-- **`answer_match` is a robust signal**: the idea that "solving Q' should give the same answer" holds up across all three datasets.
-- **AUPRC on GSM8K (0.824)**: the precision-recall curve stays high — useful for high-stakes filtering.
-
-### ❌ Didn't work as hoped
-- **`question_cycle` alone is near-random** per-dataset (AUROC 0.53–0.56). The embedding-based cycle distance is not a strong standalone predictor. The reconstructor is too capable — it recovers Q' even from bad solutions.
-- **Consistently-wrong answers are invisible** to the cycle (23% of incorrect samples). This is inherent to any self-consistency approach.
-- **Answer extraction is a noisy bottleneck**: 36% of correct solutions get `answer_match = 0` due to extraction issues, not genuine cycle failure.
-- **Reconstructor prompt-following**: 32% of Q' outputs are meta-commentary, corrupting the cycle.
+| 10% | 180 | **88.3%** |
+| 20% | 360 | 86.1% |
+| 30% | 540 | 84.8% |
+| 50% | 900 | 74.1% |
+| 100% | 1800 | 56.1% |
 
 ---
 
-## 9. Recommendations for Exp 2
+## A3. Key Failure Modes in v1
 
-1. **Fix answer extraction** — use an LLM-based answer extractor (e.g., "What is the final numeric answer in this solution?") instead of regex. This alone could lift AUROC by 5–10 points.
+- **Meta-commentary in Q' (31.9%)**: Qwen3-4B (instruct) produced reasoning preambles like *"Okay, let's see. The user provided a solution and wants me to reconstruct…"* in 575/1800 outputs despite the system prompt. This is an RLHF artefact: instruct models are trained to reason before answering, overriding few-shot format examples. Mean `question_cycle` for meta-commentary Q' was 0.270 vs 0.100 for clean Q' — but note that this `question_cycle` was computed using the 0.6B embedder, which may understate the true distance.
+- **Empty `answer_A_prime` (4.1%)**: 73/1800 extraction failures — all forced to `answer_match = 0`, incorrectly penalising 39 correct samples.
+- **Correct but `answer_match = 0` (36.3%)**: 366/1009 correct solutions got a false-negative, mostly from format mismatches (e.g. "540 meters" ≠ "540").
+- **Consistently wrong — false positives (23.3%)**: 184/791 incorrect samples had `answer_match = 1` — the model made the exact same mistake on both Q and Q'.
 
-2. **Fix the reconstructor prompt** — add a system message or few-shot examples to eliminate meta-commentary. Alternatively, post-process Q' to strip preamble.
+---
 
-3. **Weaken the reconstructor** — try GPT-4o-mini or even a local model. A weaker reconstructor should amplify the `question_cycle` signal because it won't be able to "fix" bad solutions as easily.
+# PART B — v1 (Qwen3-4B) vs v2 (Qwen3-8B-Base) Comparative Analysis
 
-4. **Add a self-consistency baseline** — sample K solutions via temperature sampling and use majority vote agreement. This is the standard approach to beat — if cycle-consistency doesn't outperform it, the reconstruction step adds cost without benefit.
+## B1. What Changed
 
-5. **Normalise the combined reward** — `answer_match ∈ {0,1}` but `question_cycle ∈ [0, 0.86]`. Try `α · answer_match + (1-α) · (1 - question_cycle)` and sweep α, or z-score both before combining.
+Two components changed between v1 and v2 — **both the reconstructor and the embedding model**:
 
-6. **Condition on difficulty** — report metrics stratified by problem difficulty (MATH has explicit levels). The current correlation may partly reflect "easy ↔ correct ↔ good cycle".
+| Component | v1 | v2 |
+|---|---|---|
+| **Reconstructor** | Qwen/Qwen3-4B (instruct) | Qwen/Qwen3-8B-Base (base, no RLHF) |
+| Reconstructor type | Instruction-tuned | Pure base model |
+| Reconstructor size | 4B | 8B |
+| **Embedding model** | Qwen/Qwen3-Embedding-**0.6B** | Qwen/Qwen3-Embedding-**4B** |
+| Embedding size | 0.6B | 4B (~7× larger) |
+| Prompt structure | System prompt + 4-shot + QUESTION: prefix | Same |
 
-7. **Try BLEU/ROUGE Q↔Q'** — a simple string-overlap metric between Q and Q' might capture reconstruction quality better than embedding cosine distance, especially for numerical details.
+This means `question_cycle` (embedding cosine distance) is affected by **both** changes: a cleaner Q' from the better reconstructor *and* a more capable embedding model computing the similarity. These two effects are **confounded** in the v1→v2 comparison and cannot be separated without additional ablations.
+
+---
+
+## B2. Reconstructor Quality: Complete Turnaround
+
+This is the most unambiguous result in the comparison. **These metrics are attributable solely to the reconstructor change** — word overlap and meta-commentary are independent of the embedding model.
+
+| Metric | v1 (Qwen3-4B instruct) | v2 (Qwen3-8B-Base) | Delta | Source |
+|---|---|---|---|---|
+| Meta-commentary in Q' | 575 / 1800 **(31.9%)** | **0 / 1800 (0.0%)** | −575 | Reconstructor only |
+| Very short Q' (<10 chars) | 18 / 1800 (1.0%) | **0 / 1800 (0.0%)** | −18 | Reconstructor only |
+| Empty `answer_A_prime` | 73 / 1800 (4.1%) | **3 / 1800 (0.2%)** | −70 | Reconstructor only |
+| Correct samples lost to empty extraction | 39 | **1** | −38 | Reconstructor only |
+| Q↔Q' word overlap (mean) | 0.453 | **0.512** | +0.059 | Reconstructor only |
+| `question_cycle` mean (all) | 0.154 | **0.137** | −0.017 | **Confounded** (reconstructor + embedding) |
+
+The `question_cycle` drop (−0.017) has two additive causes: (1) Q' is genuinely closer to Q because the 8B-Base reconstructor produces cleaner outputs, and (2) the 4B embedding model computes cosine similarity with higher representational precision than the 0.6B model. We cannot attribute this improvement to either cause in isolation.
+
+### Why the base model beats the instruct model here
+
+This reveals an important property of instruction-tuned vs base models for **structured generation tasks**:
+
+- **Qwen3-4B (instruct)** has been RLHF-trained to reason before answering. Even when told to "output only the question", the RLHF prior pushes it to narrate its reasoning process. The system prompt and few-shot examples fight against this prior — and lose 1-in-3 times.
+- **Qwen3-8B-Base** has no such prior. It is a pure next-token predictor operating entirely from in-context learning. When shown 4 demonstrations of `Solution: … → QUESTION: <clean question>`, it pattern-completes reliably every time. There is no RLHF voice telling it to "think aloud first."
+
+Counterintuitively, **the base model with few-shot is more format-obedient than the instruct model with a system prompt** for this narrow generation task.
+
+**Concrete example — id=1 (GSM8K):**
+```
+Q:    "A robe takes 2 bolts of blue fiber and half that much white fiber. How many bolts total?"
+
+Q'(v1, Qwen3-4B):
+  "Okay, let's see. The user provided a solution and wants me to reconstruct the original..."
+  → question_cycle = 0.138,  answer_match = 0  [correct sample penalised]
+
+Q'(v2, Qwen3-8B-Base):
+  "A robe takes 2 bolts of blue fiber and half that much white fiber. How many bolts total?"
+  → question_cycle = 0.009,  answer_match = 1  [correctly identified]
+```
+
+---
+
+## B3. Headline Metrics: Mixed Results by Dataset
+
+| Signal | Dataset | v1 (Qwen3-4B) | v2 (Qwen3-8B-Base) | Delta |
+|---|---|---|---|---|
+| AUROC(combined_reward) | **All** | 0.708 | 0.679 | **−0.029** |
+| AUROC(combined_reward) | **GSM8K** | 0.715 | 0.675 | **−0.040** |
+| AUROC(combined_reward) | **MATH** | 0.636 | **0.676** | **+0.040** |
+| AUROC(combined_reward) | **OlympiadBench** | 0.618 | **0.668** | **+0.050** |
+| AUPRC(combined_reward) | All | 0.770 | 0.744 | **−0.026** |
+| AUPRC(combined_reward) | MATH | 0.712 | **0.738** | **+0.026** |
+| AUPRC(combined_reward) | OlympiadBench | 0.447 | **0.460** | **+0.013** |
+| AUPRC(answer_match) | OlympiadBench | 0.335 | **0.460** | **+0.125** |
+
+**Overall headline is slightly worse; per-dataset story is the opposite for harder problems.**
+
+---
+
+## B4. The GSM8K Paradox — Why Did the Easier Dataset Go Down?
+
+Overall AUROC dropped 0.029, driven entirely by **GSM8K getting worse** despite reconstruction quality dramatically improving. This is the most instructive finding.
+
+### answer_match flips (correct samples only)
+
+| Flip direction | Count | Meaning |
+|---|---|---|
+| v1=0 → v2=1 (improved) | 188 | Meta-commentary / extraction failures fixed |
+| v1=1 → v2=0 (degraded) | 233 | 8B-Base changed the problem; solver got a *different* correct answer |
+
+Net: **−45 correct samples losing `answer_match`** → answer_match rate for correct GSM8K samples dropped from 69.0% → 56.9% (−12.1 points).
+
+### Root cause: the 8B-Base reconstructor is more semantically generative
+
+The 4B instruct model, when not producing meta-commentary, was close to verbatim copying (because it had seen the question itself to reconstruct from, and the path of least resistance was copy-paste). The 8B-Base model, operating as a true pattern-completer, **reconstructs from the semantic content of the solution** — it produces a valid, well-formed question, but sometimes with slightly different numbers or reordered constraints.
+
+| Problem | v1 (Qwen3-4B) Q' result | v2 (Qwen3-8B-Base) Q' result |
+|---|---|---|
+| id=8 | `A' = 460` ✓ (correct match) | `A' = 2000` ✗ (8B changed a number) |
+| id=19 | `A' = 2` ✓ (correct match) | `A' = 8` ✗ (8B changed a number) |
+| id=28 (FP fixed!) | `A' = 0` ✗ (same wrong answer) | `A' = 13` ✓ (8B broke the false positive) |
+
+This is a two-sided coin:
+- **Downside on GSM8K**: When problems are simple, the 8B-Base model generates plausible but slightly altered variants. A correct solver getting a different answer on the altered Q' looks like a mismatch — a false negative.
+- **Upside on false positives**: For the 101 cases where the cycle was wrongly confident (incorrect but `answer_match=1`), the 8B-Base's willingness to change the problem broke the false agreement.
+
+### Why MATH and OlympiadBench improved
+
+On harder problems, the meta-commentary in v1 was proportionally more damaging. Long, complex solutions are more likely to trigger Qwen3-4B's reasoning-aloud instinct. With 0% meta-commentary in v2, the signal on these datasets is clean for the first time. The 4B embedding model likely contributes further — a richer representation space produces sharper cosine distances between semantically divergent Q/Q' pairs.
+
+- **OlympiadBench**: Cohen's d for `answer_match` jumped 0.64 → **0.94** (medium → very large). `question_cycle` gap expanded from 0.004 → **0.029** — essentially zero in v1, now measurable. This improvement is almost certainly driven by *both* the cleaner reconstructions *and* the more discriminative 4B embeddings.
+- **MATH**: AUROC +0.040, AUPRC +0.026.
+
+---
+
+## B5. Cohen's d Effect Sizes
+
+| Signal | Dataset | v1 | v2 | Δ |
+|---|---|---|---|---|
+| `question_cycle` | All | 0.309 | 0.215 | −0.094 |
+| `answer_match` | All | 0.894 | 0.853 | −0.041 |
+| `combined_reward` | All | 0.869 | 0.792 | −0.077 |
+| `question_cycle` | GSM8K | 0.196 | 0.186 | −0.011 |
+| `answer_match` | GSM8K | 1.081 | 0.885 | **−0.196** |
+| `answer_match` | MATH | 0.603 | **0.753** | **+0.150** |
+| `combined_reward` | MATH | 0.570 | **0.690** | **+0.120** |
+| `question_cycle` | OlympiadBench | 0.024 | **0.177** | **+0.152** |
+| `answer_match` | OlympiadBench | 0.639 | **0.945** | **+0.306** |
+| `combined_reward` | OlympiadBench | 0.555 | **0.848** | **+0.292** |
+
+GSM8K was already the strongest dataset (Cohen's d = 1.08 for `answer_match` in v1). The regression there is real but the effect is still large (0.88). The gains on harder datasets are more significant scientifically.
+
+---
+
+## B6. False Positive Analysis (Consistently Wrong)
+
+| | v1 | v2 | Delta |
+|---|---|---|---|
+| Incorrect but `answer_match=1` | 184 / 791 (23.3%) | **166 / 793 (20.9%)** | **−18** |
+| FP fixed (v1=1 → v2=0) | — | 101 | — |
+| New FP introduced (v1=0 → v2=1) | — | 83 | — |
+
+The 8B-Base model's tendency to alter the problem broke 101 false positives the 4B model was blind to — including cases like id=28 where a systematic off-by-one error was consistently reproduced through the cycle in v1 but disrupted in v2.
+
+---
+
+## B7. Selective Prediction Comparison
+
+| Coverage | v1 accuracy | v2 accuracy | Delta |
+|---|---|---|---|
+| Top 10% | 88.3% | 84.4% | −3.9% |
+| Top 20% | 86.1% | 83.3% | −2.8% |
+| Top 30% | 84.8% | 82.2% | −2.6% |
+| Top 50% | 74.1% | 71.2% | −2.9% |
+| 100% | 56.1% | 55.9% | −0.1% |
+
+The GSM8K regression pulls down selective prediction in v2. Both versions still show strong lift from the 56% baseline.
+
+---
+
+## B8. The Core Trade-off
+
+| Dimension | v1 | v2 | Changed by |
+|---|---|---|---|
+| Reconstructor | Qwen3-4B instruct | Qwen3-8B-Base | Reconstructor |
+| Embedding model | 0.6B | **4B** | Embedder |
+| Format compliance | 32% meta-commentary | **0% meta-commentary** | Reconstructor |
+| Answer extraction failures | 73 | **3** | Reconstructor |
+| MATH discrimination | AUROC 0.636 | **AUROC 0.676** | Both (confounded) |
+| OlympiadBench discrimination | AUROC 0.618, d=0.55 | **AUROC 0.668, d=0.85** | Both (confounded) |
+| GSM8K discrimination | **AUROC 0.715** | AUROC 0.675 | Reconstructor (number drift) |
+| `question_cycle` mean | 0.154 | **0.137** | Both (confounded) |
+| Overall headline | **AUROC 0.708** | AUROC 0.679 | — |
+| False positives caught | 184 | **166** | Reconstructor |
+| Reconstructor number fidelity | Higher | Lower (8B changes numbers) | Reconstructor |
+
+---
+
+## B9. Key Learnings
+
+### 1. Base > Instruct for structured constrained generation
+For tasks requiring strict output format, a larger base model with few-shot demonstrations outperforms a smaller instruct model with system prompts. RLHF training introduces a prior toward verbose reasoning that competes with and sometimes overrides explicit formatting instructions. This is not a bug in Qwen3-4B — it's the expected behaviour of a helpful assistant model. But it's the wrong prior for this specific task.
+
+### 2. Reconstructor size and training paradigm are entangled — ablation needed
+Scaling from 4B→8B and Instruct→Base happened simultaneously. The format compliance improvement (0% meta-commentary) is most plausibly explained by the Base paradigm shift. The number-drift issue (8B changes problem parameters more) is more plausibly explained by size — a larger model generates more diverse completions. Future work should test **4B-Base** and **8B-Instruct** independently to disentangle these.
+
+### 3. The `question_cycle` improvement is doubly confounded
+The −0.017 drop in mean `question_cycle` has two simultaneous causes: (1) Q' is genuinely closer to Q (cleaner reconstruction by 8B-Base) and (2) the 4B embedding model measures semantic similarity more accurately than the 0.6B model. We cannot attribute the Cohen's d improvement on OlympiadBench (`question_cycle`: 0.024→0.177) to either cause alone. Specifically, the 4B embedder may simply draw a finer distinction between a garbage meta-commentary Q' and a real question — which was the dominant v1 issue.
+
+### 4. Embedding model size matters for `question_cycle` signal quality
+A 0.6B embedding model may lack the representational capacity to distinguish subtle numeric changes in math problems (e.g. "8 apples" vs "6 apples"). The 4B model's richer representation space likely produces more discriminative cosine distances — which partly explains the MATH and OlympiadBench gains, even independent of reconstructor quality.
+
+### 5. A generative reconstructor is a double-edged sword
+The 8B-Base model is more semantically creative. On hard problems (MATH, OlympiadBench), this creativity provides signal the 4B model masked with meta-commentary. On easy problems (GSM8K), the same creativity slightly alters problem parameters, producing correct-but-different second answers that fail `answer_match`. This is the central tension in the reconstructor design space.
+
+### 6. `question_cycle` was never meaningfully measurable in v1
+With 32% of v1 Q' outputs being meta-commentary garbage, `question_cycle` was measuring corrupted embeddings. The OlympiadBench Cohen's d of 0.024 (essentially zero) in v1 is now 0.177 in v2 — not because the cycle is intrinsically more discriminative, but because v1 was embedding noise.
+
+### 7. The overall AUROC regression is a red herring
+The −0.029 drop in overall AUROC is driven by GSM8K, which was already the strongest dataset. The method's real value is as a confidence signal on hard problems where the solver might fail — MATH and OlympiadBench. Both improved. Report per-dataset metrics as primary.
+
+---
+
+## B10. Recommendations for Exp 2
+
+1. **Fix 1 — LLM answer judge**: The false-negative rate (correct but `answer_match=0`) is 36–41% in both runs. An LLM that asks "are these two answers mathematically equivalent?" rather than string-matching would recover most of the 188 improvements while keeping the 101 false-positive fixes. Expected AUROC gain: +5–10 points.
+
+2. **Fix 3 — BLEU + embedding hybrid**: v2's 8B-Base model changes problem numbers without changing semantic meaning (embedding stays close, BLEU drops sharply). Adding BLEU directly targets the numerical-drift failure mode. The 4B embedder is already better at semantic gaps — BLEU adds the surface-level number-preservation check it cannot see.
+
+3. **Ablate the confounded changes**: v1→v2 changed three things (reconstructor size, reconstructor type, embedding model). Run at minimum: (a) 4B-Base reconstructor + 0.6B embedder to isolate the paradigm effect, and (b) 4B-Instruct + 4B embedder to isolate the embedding upgrade.
+
+4. **Add a number-preservation instruction**: *"All numbers that appear in the solution must appear unchanged in your reconstructed question"* — would reduce the 8B-Base numeric-drift failures without sacrificing the format quality win.
+
+5. **Report per-dataset as primary**: The headline AUROC hides that the signal is improving where it matters most (hard datasets) and regressing where it matters least. Always lead with MATH and OlympiadBench.

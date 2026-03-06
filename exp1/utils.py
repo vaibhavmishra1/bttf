@@ -4,6 +4,46 @@ import re
 from config import FLOAT_TOL
 
 
+# ── Q↔Q' similarity helpers (for hybrid_cycle) ─────────────────────────────
+
+_NUM_RE = re.compile(r"-?\d+\.?\d*")
+
+
+def _numbers(text: str) -> set[str]:
+    return set(_NUM_RE.findall(text))
+
+
+def number_jaccard(q: str, qp: str) -> float:
+    """1 − Jaccard similarity on numeric tokens.  0 = identical numbers."""
+    n_q, n_qp = _numbers(q), _numbers(qp)
+    if not n_q and not n_qp:
+        return 0.0
+    union = n_q | n_qp
+    if not union:
+        return 0.0
+    sim = len(n_q & n_qp) / len(union)
+    return 1.0 - sim   # distance: lower = more preserved
+
+
+def chrf_distance(q: str, qp: str) -> float:
+    """1 − chrF score between Q and Q'.  0 = identical text."""
+    import sacrebleu as sb
+    chrf = sb.corpus_chrf([qp.lower()], [[q.lower()]]).score / 100.0
+    return 1.0 - chrf
+
+
+def compute_hybrid_cycle(question_cycle: float,
+                         num_jac: float,
+                         chrf_dist: float) -> float:
+    """Weighted combination of three Q↔Q' distance signals.
+
+    question_cycle  — embedding cosine distance  (anchors semantic structure)
+    num_jac         — number Jaccard distance     (numerical precision)
+    chrf_dist       — character n-gram distance   (best surface text metric)
+    """
+    return 0.4 * question_cycle + 0.4 * num_jac + 0.2 * chrf_dist
+
+
 # ── Boxed-answer extraction (primary for S vs S') ────────────────────────────
 
 # Matches the last \boxed{...} — handles one level of nested braces

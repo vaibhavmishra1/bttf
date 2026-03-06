@@ -42,14 +42,19 @@ def compute_all_metrics(data: list[dict], label: str = "all") -> dict:
     print(f"  Dataset: {label}   |   N={n_total}  correct={n_c}  incorrect={n_i}  acc={acc:.1%}")
     print(f"{'─'*70}")
 
-    # ── Three signals ──────────────────────────────────────────────────────
-    # question_cycle: lower → better (correct), so negate for AUROC/AUPRC
+    # ── Signals ──────────────────────────────────────────────────────────
+    # hybrid_cycle: lower → better (correct), so negate for AUROC/AUPRC
+    #   = 0.4 * question_cycle + 0.4 * number_jaccard + 0.2 * chrf_dist
     # answer_match  : higher → better (correct)
-    # combined_reward: higher → better (correct)
+    # combined_reward: answer_match - hybrid_cycle → higher → better
     signals = {
+        "hybrid_cycle    (dist↓)": (
+            np.array([d["hybrid_cycle"]    for d in data]),
+            "lower",        # direction: lower = better for the "correct" group
+        ),
         "question_cycle  (dist↓)": (
             np.array([d["question_cycle"]  for d in data]),
-            "lower",        # direction: lower = better for the "correct" group
+            "lower",
         ),
         "answer_match    (agree↑)": (
             np.array([d["answer_match"]    for d in data], dtype=float),

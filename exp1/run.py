@@ -36,7 +36,10 @@ from config import (
 )
 from data import load_all_data
 from models import Solver, Reconstructor, Embedder
-from utils import extract_answer, extract_boxed_answer, answers_equivalent
+from utils import (
+    extract_answer, extract_boxed_answer, answers_equivalent,
+    number_jaccard, chrf_distance, compute_hybrid_cycle,
+)
 from metrics import compute_all_metrics
 from visualize import generate_all_plots
 
@@ -128,7 +131,7 @@ def main(resume: bool = False) -> None:
         solver.destroy()
         del solver
 
-    # ── Step 4: Embed Q, Q' → question_cycle ──────────────────────────
+    # ── Step 4: Embed Q, Q' → question_cycle + hybrid_cycle ─────────
     step4_path = os.path.join(OUTPUT_DIR, "step4_embeddings.jsonl")
     data = _cached(step4_path, resume)
     if data is None:
@@ -139,8 +142,16 @@ def main(resume: bool = False) -> None:
         emb_qp = embedder.embed([d["question_Q_prime"] for d in data], EMBEDDING_BATCH_SIZE)
         cosine_sims   = np.sum(emb_q * emb_qp, axis=1)
         question_cycles = 1.0 - cosine_sims
+
+        print("[Step 4b] Computing number_jaccard + chrf_dist → hybrid_cycle …")
         for d, qc in zip(data, question_cycles):
             d["question_cycle"] = float(qc)
+            num_jac  = number_jaccard(d["question"], d["question_Q_prime"])
+            chrf_d   = chrf_distance(d["question"], d["question_Q_prime"])
+            d["number_jaccard"] = num_jac
+            d["chrf_dist"]      = chrf_d
+            d["hybrid_cycle"]   = compute_hybrid_cycle(float(qc), num_jac, chrf_d)
+
         save_jsonl(data, step4_path)
         del embedder
         torch.cuda.empty_cache()
@@ -164,7 +175,7 @@ def main(resume: bool = False) -> None:
             d["correct"] = int(
                 answers_equivalent(d["answer_A"], d["ground_truth"])
             )
-            d["combined_reward"] = d["answer_match"] - d["question_cycle"]
+            d["combined_reward"] = d["answer_match"] - d["hybrid_cycle"]
         save_jsonl(data, results_path)
 
     # ── Step 9: Metrics — overall + per-dataset ────────────────────────
