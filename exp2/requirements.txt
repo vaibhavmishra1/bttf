@@ -11,3 +11,4 @@ seaborn>=0.13
 sympy>=1.12
 sacrebleu>=2.3
 tqdm>=4.66
+accelerate>=1.13

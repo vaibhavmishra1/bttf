@@ -396,8 +396,8 @@ def main(resume: bool = False) -> None:
                 for t in trajs:
                     t[f"majority_correct_K{K}"] = maj_correct
 
-        if (q_idx + 1) % 500 == 0:
-            print(f"    {q_idx + 1} questions processed")
+            if (q_idx + 1) % 500 == 0:
+                print(f"    {q_idx + 1} questions processed")
 
         save_jsonl(traj_data, step5_path)
         print(f"  MV agreement signals computed for K ∈ {K_VALUES}")
