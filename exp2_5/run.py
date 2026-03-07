@@ -24,9 +24,33 @@ import json
 import os
 import sys
 import time
+from datetime import datetime
 
 import numpy as np
 import torch
+
+
+# ── Tee: mirror all stdout to a log file ────────────────────────────────────
+
+class _TeeStream:
+    """Write to both the original stream and a log file."""
+
+    def __init__(self, stream, log_path: str):
+        self._stream = stream
+        os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
+        self._file = open(log_path, "w", encoding="utf-8")
+
+    def write(self, data):
+        self._stream.write(data)
+        self._file.write(data)
+        self._file.flush()
+
+    def flush(self):
+        self._stream.flush()
+        self._file.flush()
+
+    def close(self):
+        self._file.close()
 
 # ── Path setup ───────────────────────────────────────────────────────────────
 # exp2_5 at position 0, then exp1, then exp2 (for voting.py)
@@ -118,6 +142,14 @@ def _destroy_vllm(llm) -> None:
 def main(resume: bool = False) -> None:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(PLOTS_DIR, exist_ok=True)
+
+    # ── Set up logging to file ────────────────────────────────────────────
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(OUTPUT_DIR, f"run_{timestamp}.log")
+    tee = _TeeStream(sys.stdout, log_path)
+    sys.stdout = tee
+    print(f"Experiment 2.5 — run started at {datetime.now().isoformat()}")
+    print(f"Log file: {log_path}")
 
     t0 = time.time()
     sep = "\n" + "=" * 70
@@ -633,6 +665,21 @@ def main(resume: bool = False) -> None:
     elapsed = time.time() - t0
     print(f"\n✓ Done in {elapsed / 60:.1f} min.  Outputs → {OUTPUT_DIR}")
     print(f"  Plots → {PLOTS_DIR}/")
+    print(f"  Log   → {log_path}")
+
+    # ── Close log & create stable symlink ─────────────────────────────
+    sys.stdout = tee._stream          # restore original stdout
+    tee.close()
+    latest = os.path.join(OUTPUT_DIR, "run_latest.log")
+    try:
+        if os.path.islink(latest) or os.path.exists(latest):
+            os.remove(latest)
+        os.symlink(os.path.basename(log_path), latest)
+    except OSError:
+        # Windows or permission issues — just copy instead
+        import shutil
+        shutil.copy2(log_path, latest)
+    print(f"Log saved to {log_path}  (also at {latest})")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -644,4 +691,11 @@ if __name__ == "__main__":
         help="Skip steps whose checkpoint files already exist.",
     )
     args = parser.parse_args()
-    main(resume=args.resume)
+    try:
+        main(resume=args.resume)
+    except BaseException:
+        # Ensure the log file is flushed even on crash
+        if isinstance(sys.stdout, _TeeStream):
+            sys.stdout._file.flush()
+            sys.stdout = sys.stdout._stream
+        raise
